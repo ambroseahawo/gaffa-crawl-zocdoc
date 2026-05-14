@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from src.config.base_logger import get_logger
 
 logger = get_logger()
+
+
+def gaffa_envelope_json(envelope: Any) -> str:
+    """JSON for logs — same parsed object shape the API returned"""
+    try:
+        return json.dumps(envelope, default=str)
+    except (TypeError, ValueError):
+        return repr(envelope)
 
 
 def capture_dom_output_url(envelope: dict[str, Any]) -> str | None:

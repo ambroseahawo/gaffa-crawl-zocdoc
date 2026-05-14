@@ -23,7 +23,7 @@ from src.output.json_out import (
     write_index_page_json,
     write_provider_page_json,
 )
-from src.processors.envelope import capture_dom_output_url
+from src.processors.envelope import capture_dom_output_url, gaffa_envelope_json
 from src.processors.provider_links import (
     profile_index_pagination_hrefs,
     provider_hrefs_from_html,
@@ -116,7 +116,9 @@ async def fetch_profile_index_html(
     debug_envelope = await browse_capture_envelope(session, api_key, page_url, options, gaffa_sem=gaffa_sem)
     dom_url = capture_dom_output_url(debug_envelope)
     if not dom_url:
-        raise RuntimeError(f"No capture_dom output URL for {page_url!r}.")
+        raise RuntimeError(
+            f"No capture_dom output URL for {page_url!r}. {gaffa_envelope_json(debug_envelope)}"
+        )
     async with session.get(dom_url) as resp:
         resp.raise_for_status()
         index_html = await resp.text()

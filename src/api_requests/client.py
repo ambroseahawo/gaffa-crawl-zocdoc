@@ -19,7 +19,7 @@ import aiohttp
 
 from src.config.base_logger import get_logger
 from src.config.constants import DEFAULT_API_BASE, TERMINAL_STATES
-from src.processors.envelope import capture_dom_output_url
+from src.processors.envelope import capture_dom_output_url, gaffa_envelope_json
 
 logger = get_logger()
 
@@ -57,7 +57,7 @@ async def post_browser_request(
     async with session.post(url, json=body, headers=headers) as resp:
         raw = await resp.read()
         if resp.status >= 400:
-            raise RuntimeError(f"Gaffa POST {resp.status}: {raw[:800]!r}")
+            raise RuntimeError(f"Gaffa POST {resp.status}: {raw.decode(errors='replace')}")
         envelope: dict[str, Any] = json.loads(raw.decode()) if raw else {}
     return unwrap_browser_request(envelope), envelope
 
@@ -78,7 +78,7 @@ async def get_browser_request(
     async with session.get(url, headers=headers) as resp:
         raw = await resp.read()
         if resp.status >= 400:
-            raise RuntimeError(f"Gaffa GET {resp.status}: {raw[:800]!r}")
+            raise RuntimeError(f"Gaffa GET {resp.status}: {raw.decode(errors='replace')}")
         envelope: dict[str, Any] = json.loads(raw.decode()) if raw else {}
     return unwrap_browser_request(envelope), envelope
 
@@ -116,8 +116,7 @@ async def poll_browser_request_until_terminal(
             )
         if state in TERMINAL_STATES:
             if state == "failed":
-                err = inner.get("error") or inner.get("error_reason")
-                raise RuntimeError(f"Browser request failed: {err!r} — {inner!r}")
+                raise RuntimeError(f"Browser request failed: {gaffa_envelope_json(last_envelope)}")
             if state == "completed" and not capture_dom_output_url(last_envelope):
                 inner, last_envelope = await get_browser_request(session, api_key, request_id, base_url=cfg.base_url)
             return inner, last_envelope
@@ -154,7 +153,7 @@ async def run_browser_request_to_completion(
     state = (inner.get("state") or "").lower()
     logger.info("gaffa request id=%s state=%s", request_id, state or "?")
     if state == "failed":
-        raise RuntimeError(f"Browser request failed immediately: {inner!r}")
+        raise RuntimeError(f"Browser request failed immediately: {gaffa_envelope_json(post_envelope)}")
     if state == "completed":
         if not capture_dom_output_url(post_envelope):
             inner, post_envelope = await get_browser_request(session, api_key, request_id, base_url=opts.base_url)
