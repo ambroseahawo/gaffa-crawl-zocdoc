@@ -1,9 +1,11 @@
+[tool.poetry]
+package-mode = false
+
 [project]
 name = "scrap-zocdoc"
 version = "0.1.0"
 description = ""
 authors = []
-package-mode = false
 requires-python = ">=3.10"
 dependencies = [
     "python-dotenv (>=1.2.2,<2.0.0)",
