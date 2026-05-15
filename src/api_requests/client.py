@@ -220,20 +220,16 @@ async def _run_browser_request_once(
         return inner, post_envelope, poll_attempts
 
     poll_opts = replace(opts, target_url=target_url, request_attempt=request_attempt)
-    inner, last, poll_attempts = await poll_browser_request_until_terminal(
-        session, api_key, request_id, poll_opts
-    )
+    inner, last, poll_attempts = await poll_browser_request_until_terminal(session, api_key, request_id, poll_opts)
     return inner, last, poll_attempts
 
 
-async def run_browser_request_to_completion(
+async def _browser_request_with_dom_retries(
     session: aiohttp.ClientSession,
     api_key: str,
     body: dict[str, Any],
-    options: GaffaClientOptions | None = None,
+    opts: GaffaClientOptions,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """run browser request for given number of attempts"""
-    opts = options or GaffaClientOptions()
     target_url = str(body.get("url") or "")
     url_bit = f" url={target_url}" if target_url else ""
     total = max(1, opts.total_attempts)
@@ -241,9 +237,7 @@ async def run_browser_request_to_completion(
     for attempt in range(total):
         request_attempt = attempt + 1
         try:
-            inner, envelope, poll_attempts = await _run_browser_request_once(
-                session, api_key, body, opts, request_attempt=request_attempt
-            )
+            inner, envelope, poll_attempts = await _run_browser_request_once(session, api_key, body, opts, request_attempt=request_attempt)
             if not capture_dom_output_url(envelope):
                 logger.info(
                     "gaffa request failed%s request_attempt=%s poll_attempts=%s",
@@ -259,10 +253,9 @@ async def run_browser_request_to_completion(
                 poll_attempts,
             )
             return inner, envelope
-        except (RuntimeError, TimeoutError, aiohttp.ClientError) as exc:
+        except (RuntimeError, TimeoutError, aiohttp.ClientError, OSError) as exc:
             last_exc = exc
-            if request_attempt >= total:
-                raise
+            final = request_attempt >= total
             logger.warning(
                 "gaffa request_attempt %s/%s failed%s: %s",
                 request_attempt,
@@ -270,5 +263,22 @@ async def run_browser_request_to_completion(
                 url_bit,
                 exc,
             )
+            if final:
+                raise
             await asyncio.sleep(min(2**attempt, 30))
     raise last_exc  # pragma: no cover
+
+
+async def run_browser_request_to_completion(
+    session: aiohttp.ClientSession,
+    api_key: str,
+    body: dict[str, Any],
+    options: GaffaClientOptions | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """
+    POST + poll until ``capture_dom`` has an HTTP ``output`` URL (DOM text on Gaffa storage).
+
+    Retries up to ``total_attempts`` whenever that URL is missing or the HTTP/poll path raises.
+    """
+    opts = options or GaffaClientOptions()
+    return await _browser_request_with_dom_retries(session, api_key, body, opts)
