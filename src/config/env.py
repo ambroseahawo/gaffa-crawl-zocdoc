@@ -4,31 +4,31 @@ import os
 
 from dotenv import load_dotenv
 
+from .constants import CONCURRENT_REQUESTS
+
 load_dotenv(override=True)
 
 GAFFA_API_KEY = os.getenv("GAFFA_API_KEY")
 GAFFA_CONCURRENT = os.getenv("GAFFA_CONCURRENT")
-CONCURRENT_GAFFA_REQUESTS = os.getenv("CONCURRENT_GAFFA_REQUESTS")
-
-
-def _env_truthy(value: str | None) -> bool:
-    if not value:
-        return False
-    return value.strip().lower() in ("1", "true", "yes", "on")
+CONCURRENT_GAFFA_REQUESTS = os.getenv("CONCURRENT_GAFFA_REQUESTS", str(CONCURRENT_REQUESTS))
 
 
 def gaffa_concurrency_settings() -> tuple[int, int]:
     """(index_batch_size, semaphore_slots)"""
-
-    if not _env_truthy(GAFFA_CONCURRENT):
+    if not GAFFA_CONCURRENT or GAFFA_CONCURRENT.strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
         return 1, 1
     raw = (CONCURRENT_GAFFA_REQUESTS or "").strip()
     if not raw:
-        return 5, 5
+        return CONCURRENT_REQUESTS, CONCURRENT_REQUESTS
     try:
         n = int(raw)
     except ValueError:
-        return 5, 5
+        return CONCURRENT_REQUESTS, CONCURRENT_REQUESTS
     if n < 1:
-        return 5, 5
+        return CONCURRENT_REQUESTS, CONCURRENT_REQUESTS
     return n, n
