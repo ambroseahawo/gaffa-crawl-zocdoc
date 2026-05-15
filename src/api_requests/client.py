@@ -18,7 +18,7 @@ from typing import Any
 import aiohttp
 
 from src.config.base_logger import get_logger
-from src.config.constants import DEFAULT_API_BASE, TERMINAL_STATES
+from src.config.constants import DEFAULT_API_BASE, TERMINAL_STATES, TOTAL_ATTEMPTS
 from src.processors.envelope import capture_dom_output_url, gaffa_envelope_json
 
 logger = get_logger()
@@ -26,11 +26,25 @@ logger = get_logger()
 
 @dataclass(frozen=True, slots=True)
 class GaffaClientOptions:
-    """Base URL and polling tuning for browser requests."""
+    """Base URL, polling, and retry settings for browser requests."""
 
     base_url: str = DEFAULT_API_BASE
     poll_interval_sec: float = 2.0
     poll_max_attempts: int = 90
+    total_attempts: int = TOTAL_ATTEMPTS
+
+
+def _http_error(method: str, status: int, raw: bytes) -> str:
+    text = raw.decode(errors="replace").strip()
+    if text.startswith("<"):
+        return f"Gaffa {method} {status}"
+    try:
+        body = json.loads(text)
+        if isinstance(body, dict):
+            return gaffa_envelope_json(body)
+    except json.JSONDecodeError:
+        pass
+    return f"Gaffa {method} {status}"
 
 
 def unwrap_browser_request(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -57,7 +71,7 @@ async def post_browser_request(
     async with session.post(url, json=body, headers=headers) as resp:
         raw = await resp.read()
         if resp.status >= 400:
-            raise RuntimeError(f"Gaffa POST {resp.status}: {raw.decode(errors='replace')}")
+            raise RuntimeError(_http_error("POST", resp.status, raw))
         envelope: dict[str, Any] = json.loads(raw.decode()) if raw else {}
     return unwrap_browser_request(envelope), envelope
 
@@ -78,7 +92,7 @@ async def get_browser_request(
     async with session.get(url, headers=headers) as resp:
         raw = await resp.read()
         if resp.status >= 400:
-            raise RuntimeError(f"Gaffa GET {resp.status}: {raw.decode(errors='replace')}")
+            raise RuntimeError(_http_error("GET", resp.status, raw))
         envelope: dict[str, Any] = json.loads(raw.decode()) if raw else {}
     return unwrap_browser_request(envelope), envelope
 
@@ -90,52 +104,83 @@ async def poll_browser_request_until_terminal(
     options: GaffaClientOptions | None = None,
     *,
     target_url: str = "",
-) -> tuple[dict[str, Any], dict[str, Any]]:
+    request_attempt: int = 1,
+) -> tuple[dict[str, Any], dict[str, Any], int]:
     """
     Poll GET /v1/browser/requests/{id} until `state` is completed or failed.
-    Returns (inner_resource, last_raw_envelope).
+    Returns (inner_resource, last_raw_envelope, poll_attempts for this request_attempt).
     """
     cfg = options or GaffaClientOptions()
     last_envelope: dict[str, Any] = {}
     last_state: str | None = None
     url_bit = f" url={target_url}" if target_url else ""
-    for attempt in range(cfg.poll_max_attempts):
+    poll_attempts = 0
+    for poll_idx in range(cfg.poll_max_attempts):
+        poll_attempt = poll_idx + 1
+        poll_attempts = poll_attempt
         inner, last_envelope = await get_browser_request(session, api_key, request_id, base_url=cfg.base_url)
         state = (inner.get("state") or "").lower()
         if state != last_state:
-            logger.info("gaffa poll id=%s%s state=%s", request_id, url_bit, state or "?")
-            last_state = state
-        elif attempt > 0 and (attempt + 1) % 15 == 0:
             logger.info(
-                "gaffa poll id=%s%s still %s (%s/%s)",
+                "gaffa poll id=%s%s state=%s request_attempt=%s poll_attempt=%s/%s",
                 request_id,
                 url_bit,
                 state or "?",
-                attempt + 1,
+                request_attempt,
+                poll_attempt,
+                cfg.poll_max_attempts,
+            )
+            last_state = state
+        elif poll_idx > 0 and poll_attempt % 15 == 0:
+            logger.info(
+                "gaffa poll id=%s%s still %s request_attempt=%s poll_attempt=%s/%s",
+                request_id,
+                url_bit,
+                state or "?",
+                request_attempt,
+                poll_attempt,
                 cfg.poll_max_attempts,
             )
         if state in TERMINAL_STATES:
             if state == "failed":
-                raise RuntimeError(f"Browser request failed: {gaffa_envelope_json(last_envelope)}")
+                logger.info(
+                    "gaffa request failed id=%s%s request_attempt=%s poll_attempts=%s",
+                    request_id,
+                    url_bit,
+                    request_attempt,
+                    poll_attempts,
+                )
+                raise RuntimeError(gaffa_envelope_json(last_envelope))
             if state == "completed" and not capture_dom_output_url(last_envelope):
+                poll_attempts += 1
                 inner, last_envelope = await get_browser_request(session, api_key, request_id, base_url=cfg.base_url)
-            return inner, last_envelope
+            logger.info(
+                "gaffa request completed id=%s%s request_attempt=%s poll_attempts=%s",
+                request_id,
+                url_bit,
+                request_attempt,
+                poll_attempts,
+            )
+            return inner, last_envelope, poll_attempts
         await asyncio.sleep(cfg.poll_interval_sec)
     logger.error(
-        "gaffa poll timeout id=%s%s after %s attempts",
+        "gaffa poll timeout id=%s%s request_attempt=%s poll_attempts=%s",
         request_id,
         url_bit,
+        request_attempt,
         cfg.poll_max_attempts,
     )
     raise TimeoutError(f"Gaffa request {request_id} did not reach a terminal state after polling.")
 
 
-async def run_browser_request_to_completion(
+async def _run_browser_request_once(
     session: aiohttp.ClientSession,
     api_key: str,
     body: dict[str, Any],
     options: GaffaClientOptions | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+    *,
+    request_attempt: int = 1,
+) -> tuple[dict[str, Any], dict[str, Any], int]:
     """
     POST a browser request, then poll until completed/failed if not already terminal.
 
@@ -144,28 +189,91 @@ async def run_browser_request_to_completion(
     """
     opts = options or GaffaClientOptions()
     target_url = str(body.get("url") or "")
-    logger.info("gaffa request start url=%s", target_url)
+    url_bit = f" url={target_url}" if target_url else ""
+    logger.info("gaffa request start%s request_attempt=%s", url_bit, request_attempt)
     inner, post_envelope = await post_browser_request(session, api_key, body, base_url=opts.base_url)
     request_id = inner.get("id")
     if not request_id:
         raise RuntimeError(f"Gaffa did not return request id: {post_envelope!r}")
 
     state = (inner.get("state") or "").lower()
-    logger.info("gaffa request id=%s state=%s", request_id, state or "?")
+    poll_attempts = 0
     if state == "failed":
-        raise RuntimeError(f"Browser request failed immediately: {gaffa_envelope_json(post_envelope)}")
+        logger.info(
+            "gaffa request failed id=%s%s request_attempt=%s poll_attempts=%s",
+            request_id,
+            url_bit,
+            request_attempt,
+            poll_attempts,
+        )
+        raise RuntimeError(gaffa_envelope_json(post_envelope))
     if state == "completed":
         if not capture_dom_output_url(post_envelope):
+            poll_attempts = 1
             inner, post_envelope = await get_browser_request(session, api_key, request_id, base_url=opts.base_url)
-        logger.info("gaffa request done id=%s state=completed", request_id)
-        return inner, post_envelope
+        logger.info(
+            "gaffa request completed id=%s%s request_attempt=%s poll_attempts=%s",
+            request_id,
+            url_bit,
+            request_attempt,
+            poll_attempts,
+        )
+        return inner, post_envelope, poll_attempts
 
-    inner, last = await poll_browser_request_until_terminal(
-        session, api_key, request_id, options=opts, target_url=target_url
-    )
-    logger.info(
-        "gaffa request done id=%s state=%s",
+    inner, last, poll_attempts = await poll_browser_request_until_terminal(
+        session,
+        api_key,
         request_id,
-        (inner.get("state") or "").lower() or "?",
+        options=opts,
+        target_url=target_url,
+        request_attempt=request_attempt,
     )
-    return inner, last
+    return inner, last, poll_attempts
+
+
+async def run_browser_request_to_completion(
+    session: aiohttp.ClientSession,
+    api_key: str,
+    body: dict[str, Any],
+    options: GaffaClientOptions | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """run browser request for given number of attempts"""
+    opts = options or GaffaClientOptions()
+    target_url = str(body.get("url") or "")
+    url_bit = f" url={target_url}" if target_url else ""
+    total = max(1, opts.total_attempts)
+    last_exc: BaseException | None = None
+    for attempt in range(total):
+        request_attempt = attempt + 1
+        try:
+            inner, envelope, poll_attempts = await _run_browser_request_once(
+                session, api_key, body, opts, request_attempt=request_attempt
+            )
+            if not capture_dom_output_url(envelope):
+                logger.info(
+                    "gaffa request failed%s request_attempt=%s poll_attempts=%s",
+                    url_bit,
+                    request_attempt,
+                    poll_attempts,
+                )
+                raise RuntimeError(gaffa_envelope_json(envelope))
+            logger.info(
+                "gaffa done%s request_attempt=%s poll_attempts=%s",
+                url_bit,
+                request_attempt,
+                poll_attempts,
+            )
+            return inner, envelope
+        except (RuntimeError, TimeoutError, aiohttp.ClientError) as exc:
+            last_exc = exc
+            if request_attempt >= total:
+                raise
+            logger.warning(
+                "gaffa request_attempt %s/%s failed%s: %s",
+                request_attempt,
+                total,
+                url_bit,
+                exc,
+            )
+            await asyncio.sleep(min(2**attempt, 30))
+    raise last_exc  # pragma: no cover

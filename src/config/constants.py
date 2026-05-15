@@ -14,3 +14,5 @@ TERMINAL_STATES = frozenset({"completed", "failed"})
 
 # Max provider fetches per listing index page; budget resets each page. ``0``/``None`` = unlimited.
 MAX_PROVIDERS_PER_LISTING: int | None = 100
+
+TOTAL_ATTEMPTS = 3

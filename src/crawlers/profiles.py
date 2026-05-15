@@ -109,7 +109,7 @@ async def browse_capture_envelope(
     """
     async with gaffa_sem:
         body = browse_request_body(url)
-        _, debug_envelope = await run_browser_request_to_completion(session, api_key, body, options=options)
+        _, debug_envelope = await run_browser_request_to_completion(session, api_key, body, options)
     return debug_envelope
 
 
@@ -122,10 +122,12 @@ async def fetch_profile_index_html(
     gaffa_sem: asyncio.Semaphore,
 ) -> tuple[dict, str]:
     """Profile index: same browser run as providers, plus download ``capture_dom`` HTML."""
-    debug_envelope = await browse_capture_envelope(session, api_key, page_url, options, gaffa_sem=gaffa_sem)
+    debug_envelope = await browse_capture_envelope(
+        session, api_key, page_url, options, gaffa_sem=gaffa_sem
+    )
     dom_url = capture_dom_output_url(debug_envelope)
     if not dom_url:
-        raise RuntimeError(f"No capture_dom output URL for {page_url!r}. {gaffa_envelope_json(debug_envelope)}")
+        raise RuntimeError(gaffa_envelope_json(debug_envelope))
     async with session.get(dom_url) as resp:
         resp.raise_for_status()
         index_html = await resp.text()
