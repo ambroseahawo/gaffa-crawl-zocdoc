@@ -28,7 +28,7 @@ from src.processors.provider_links import (
     profile_index_pagination_hrefs,
     provider_hrefs_from_html,
     provider_slug_from_url,
-    zocdoc_provider_urls,
+    absolute_zocdoc_urls,
 )
 
 logger = get_logger()
@@ -56,6 +56,13 @@ class CrawlState:
 
     queue: deque[str]
     seen: set[str]
+
+
+@dataclass
+class IndexRowSchedule:
+    tasks: list[asyncio.Task[None]]
+    stat: tuple[int, str, int, int]
+    hit_cap: bool
 
 
 def browse_request_body(url: str) -> dict:
@@ -89,7 +96,7 @@ def browse_request_body(url: str) -> dict:
 
 def canonical_index_url(url: str) -> str:
     """canonicalize index url"""
-    resolved = zocdoc_provider_urls([url], origin=ZOCDOC_ORIGIN)
+    resolved = absolute_zocdoc_urls([url], origin=ZOCDOC_ORIGIN)
     return resolved[0] if resolved else url
 
 
@@ -138,7 +145,7 @@ async def fetch_profile_index_html(
 def enqueue_pagination_links(queue: deque[str], seen: set[str], html: str) -> None:
     """enqueue pagination links"""
     for ph in profile_index_pagination_hrefs(html):
-        for absolute in zocdoc_provider_urls([ph], origin=ZOCDOC_ORIGIN):
+        for absolute in absolute_zocdoc_urls([ph], origin=ZOCDOC_ORIGIN):
             nk = canonical_index_url(absolute)
             if nk not in seen:
                 queue.append(absolute)
@@ -193,36 +200,46 @@ async def _gather_ok_index_rows(
     return ok_rows
 
 
+def _schedule_providers_for_row(
+    http: GaffaHttp,
+    key: str,
+    env: dict,
+    html: str,
+    cap: int | None,
+) -> IndexRowSchedule:
+    page_num = index_page_number(key)
+    index_path = write_index_page_json(page_num, key, env)
+    logger.info("index JSON page=%s path=%s", page_num, index_path)
+
+    page_urls = absolute_zocdoc_urls(provider_hrefs_from_html(html), origin=ZOCDOC_ORIGIN)
+    seen_slugs: set[str] = set()
+    tasks: list[asyncio.Task[None]] = []
+    hit_cap = False
+    for provider_url in page_urls:
+        slug = provider_slug_from_url(provider_url)
+        if not slug or slug in seen_slugs:
+            continue
+        if cap is not None and len(tasks) >= cap:
+            hit_cap = True
+            break
+        seen_slugs.add(slug)
+        tasks.append(asyncio.create_task(_fetch_and_write_provider(http, provider_url, page_num, slug)))
+    return IndexRowSchedule(tasks, (page_num, key, len(page_urls), len(seen_slugs)), hit_cap)
+
+
 def _schedule_provider_tasks(
     http: GaffaHttp,
     ok_rows: list[tuple[str, str, dict, str]],
 ) -> tuple[list[asyncio.Task[None]], list[tuple[int, str, int, int]]]:
+    cap = _effective_max_providers_per_listing()
     all_provider_jobs: list[asyncio.Task[None]] = []
     page_stats: list[tuple[int, str, int, int]] = []
-    cap = _effective_max_providers_per_listing()
     hit_cap = False
-
     for key, _page_url, env, html in ok_rows:
-        page_num = index_page_number(key)
-        index_path = write_index_page_json(page_num, key, env)
-        logger.info("index JSON page=%s path=%s", page_num, index_path)
-
-        page_urls = zocdoc_provider_urls(provider_hrefs_from_html(html), origin=ZOCDOC_ORIGIN)
-        seen_slugs: set[str] = set()
-        row_scheduled = 0
-
-        for provider_url in page_urls:
-            slug = provider_slug_from_url(provider_url)
-            if not slug or slug in seen_slugs:
-                continue
-            if cap is not None and row_scheduled >= cap:
-                hit_cap = True
-                break
-            seen_slugs.add(slug)
-            row_scheduled += 1
-            all_provider_jobs.append(asyncio.create_task(_fetch_and_write_provider(http, provider_url, page_num, slug)))
-        page_stats.append((page_num, key, len(page_urls), len(seen_slugs)))
-
+        row = _schedule_providers_for_row(http, key, env, html, cap)
+        all_provider_jobs.extend(row.tasks)
+        page_stats.append(row.stat)
+        hit_cap = hit_cap or row.hit_cap
     if hit_cap and cap is not None:
         logger.info("provider schedule hit per-listing cap=%d", cap)
     return all_provider_jobs, page_stats
@@ -244,12 +261,42 @@ def _enqueue_pagination_for_rows(state: CrawlState, ok_rows: list[tuple[str, str
         enqueue_pagination_links(state.queue, state.seen, html)
 
 
+async def _run_crawl_cycles(
+    http: GaffaHttp,
+    state: CrawlState,
+    index_batch: int,
+    sem_slots: int,
+) -> None:
+    cycle = 0
+    while state.queue:
+        batch = pop_next_index_batch(state.queue, state.seen, max_items=index_batch)
+        if not batch:
+            break
+
+        cycle += 1
+        batch_urls = [u for _k, u in batch]
+        logger.info("cycle=%d index fetch count=%d urls=%s", cycle, len(batch_urls), batch_urls)
+        ok_rows = await _gather_ok_index_rows(http, batch)
+        provider_tasks, page_stats = _schedule_provider_tasks(http, ok_rows)
+        logger.info(
+            "cycle=%d provider scheduled=%d concurrent_limit=%d",
+            cycle,
+            len(provider_tasks),
+            sem_slots,
+        )
+        if provider_tasks:
+            await asyncio.gather(*provider_tasks)
+            logger.info("cycle=%d provider batch done", cycle)
+        _log_index_batch_stats(page_stats)
+        _enqueue_pagination_for_rows(state, ok_rows)
+        logger.info("cycle=%d done queue=%d seen=%d", cycle, len(state.queue), len(state.seen))
+
+
 async def crawl_profile_indexes(api_key: str) -> None:
     """Crawl every profile-list URL discovered via pagination until the queue is empty."""
     target_url = "https://www.zocdoc.com/profiles/new-york"
     options = GaffaClientOptions(base_url=DEFAULT_API_BASE)
     index_batch, sem_slots = gaffa_concurrency_settings()
-    gaffa_sem = asyncio.Semaphore(sem_slots)
     state = CrawlState(deque([target_url]), set())
     cap_display = _effective_max_providers_per_listing()
     logger.info(
@@ -261,40 +308,9 @@ async def crawl_profile_indexes(api_key: str) -> None:
         cap_display if cap_display is not None else "unlimited",
     )
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600)) as session:
-        http = GaffaHttp(session, api_key, options, gaffa_sem)
-        cycle = 0
-        while state.queue:
-            batch = pop_next_index_batch(
-                state.queue,
-                state.seen,
-                max_items=index_batch,
-            )
-            if not batch:
-                break
-
-            cycle += 1
-            batch_urls = [u for _k, u in batch]
-            logger.info("cycle=%d index fetch count=%d urls=%s", cycle, len(batch_urls), batch_urls)
-            ok_rows = await _gather_ok_index_rows(http, batch)
-            provider_tasks, page_stats = _schedule_provider_tasks(http, ok_rows)
-            logger.info(
-                "cycle=%d provider scheduled=%d concurrent_limit=%d",
-                cycle,
-                len(provider_tasks),
-                sem_slots,
-            )
-            if provider_tasks:
-                await asyncio.gather(*provider_tasks)
-                logger.info("cycle=%d provider batch done", cycle)
-            _log_index_batch_stats(page_stats)
-            _enqueue_pagination_for_rows(state, ok_rows)
-            logger.info(
-                "cycle=%d done queue=%d seen=%d",
-                cycle,
-                len(state.queue),
-                len(state.seen),
-            )
-        logger.info("crawl finished (queue empty or drained)")
+        http = GaffaHttp(session, api_key, options, asyncio.Semaphore(sem_slots))
+        await _run_crawl_cycles(http, state, index_batch, sem_slots)
+    logger.info("crawl finished (queue empty or drained)")
 
 
 async def main() -> None:

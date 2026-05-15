@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import aiohttp
@@ -32,6 +32,8 @@ class GaffaClientOptions:
     poll_interval_sec: float = 2.0
     poll_max_attempts: int = 90
     total_attempts: int = TOTAL_ATTEMPTS
+    target_url: str = ""
+    request_attempt: int = 1
 
 
 def _http_error(method: str, status: int, raw: bytes) -> str:
@@ -102,9 +104,6 @@ async def poll_browser_request_until_terminal(
     api_key: str,
     request_id: str,
     options: GaffaClientOptions | None = None,
-    *,
-    target_url: str = "",
-    request_attempt: int = 1,
 ) -> tuple[dict[str, Any], dict[str, Any], int]:
     """
     Poll GET /v1/browser/requests/{id} until `state` is completed or failed.
@@ -113,7 +112,7 @@ async def poll_browser_request_until_terminal(
     cfg = options or GaffaClientOptions()
     last_envelope: dict[str, Any] = {}
     last_state: str | None = None
-    url_bit = f" url={target_url}" if target_url else ""
+    url_bit = f" url={cfg.target_url}" if cfg.target_url else ""
     poll_attempts = 0
     for poll_idx in range(cfg.poll_max_attempts):
         poll_attempt = poll_idx + 1
@@ -126,7 +125,7 @@ async def poll_browser_request_until_terminal(
                 request_id,
                 url_bit,
                 state or "?",
-                request_attempt,
+                cfg.request_attempt,
                 poll_attempt,
                 cfg.poll_max_attempts,
             )
@@ -137,7 +136,7 @@ async def poll_browser_request_until_terminal(
                 request_id,
                 url_bit,
                 state or "?",
-                request_attempt,
+                cfg.request_attempt,
                 poll_attempt,
                 cfg.poll_max_attempts,
             )
@@ -147,7 +146,7 @@ async def poll_browser_request_until_terminal(
                     "gaffa request failed id=%s%s request_attempt=%s poll_attempts=%s",
                     request_id,
                     url_bit,
-                    request_attempt,
+                    cfg.request_attempt,
                     poll_attempts,
                 )
                 raise RuntimeError(gaffa_envelope_json(last_envelope))
@@ -158,7 +157,7 @@ async def poll_browser_request_until_terminal(
                 "gaffa request completed id=%s%s request_attempt=%s poll_attempts=%s",
                 request_id,
                 url_bit,
-                request_attempt,
+                cfg.request_attempt,
                 poll_attempts,
             )
             return inner, last_envelope, poll_attempts
@@ -167,7 +166,7 @@ async def poll_browser_request_until_terminal(
         "gaffa poll timeout id=%s%s request_attempt=%s poll_attempts=%s",
         request_id,
         url_bit,
-        request_attempt,
+        cfg.request_attempt,
         cfg.poll_max_attempts,
     )
     raise TimeoutError(f"Gaffa request {request_id} did not reach a terminal state after polling.")
@@ -220,13 +219,9 @@ async def _run_browser_request_once(
         )
         return inner, post_envelope, poll_attempts
 
+    poll_opts = replace(opts, target_url=target_url, request_attempt=request_attempt)
     inner, last, poll_attempts = await poll_browser_request_until_terminal(
-        session,
-        api_key,
-        request_id,
-        options=opts,
-        target_url=target_url,
-        request_attempt=request_attempt,
+        session, api_key, request_id, poll_opts
     )
     return inner, last, poll_attempts
 

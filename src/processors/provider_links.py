@@ -52,8 +52,8 @@ def profile_index_pagination_hrefs(html: str) -> list[str]:
     return out
 
 
-def zocdoc_provider_urls(hrefs: list[str], *, origin: str) -> list[str]:
-    """Resolve hrefs to origin and dedupe"""
+def absolute_zocdoc_urls(hrefs: list[str], *, origin: str) -> list[str]:
+    """Resolve hrefs to absolute zocdoc.com URLs and dedupe"""
     urls: list[str] = []
     for href in hrefs:
         href = (href or "").strip()
@@ -72,7 +72,7 @@ def zocdoc_provider_urls(hrefs: list[str], *, origin: str) -> list[str]:
     urls = list(dict.fromkeys(urls))
     if hrefs and not urls:
         logger.warning(
-            "zocdoc_provider_urls: all %d hrefs dropped (origin=%s)",
+            "absolute_zocdoc_urls: all %d hrefs dropped (origin=%s)",
             len(hrefs),
             origin,
         )
