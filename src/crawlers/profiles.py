@@ -25,10 +25,10 @@ from src.output.json_out import (
 )
 from src.processors.envelope import capture_dom_output_url, gaffa_envelope_json
 from src.processors.provider_links import (
+    absolute_zocdoc_urls,
     profile_index_pagination_hrefs,
     provider_hrefs_from_html,
     provider_slug_from_url,
-    absolute_zocdoc_urls,
 )
 
 logger = get_logger()
@@ -60,6 +60,8 @@ class CrawlState:
 
 @dataclass
 class IndexRowSchedule:
+    """index row schedule options"""
+
     tasks: list[asyncio.Task[None]]
     stat: tuple[int, str, int, int]
     hit_cap: bool
@@ -129,9 +131,7 @@ async def fetch_profile_index_html(
     gaffa_sem: asyncio.Semaphore,
 ) -> tuple[dict, str]:
     """Profile index: same browser run as providers, plus download ``capture_dom`` HTML."""
-    debug_envelope = await browse_capture_envelope(
-        session, api_key, page_url, options, gaffa_sem=gaffa_sem
-    )
+    debug_envelope = await browse_capture_envelope(session, api_key, page_url, options, gaffa_sem=gaffa_sem)
     dom_url = capture_dom_output_url(debug_envelope)
     if not dom_url:
         raise RuntimeError(gaffa_envelope_json(debug_envelope))
@@ -177,7 +177,9 @@ async def _fetch_and_write_provider(
     slug: str,
 ) -> None:
     try:
-        prov_env = await browse_capture_envelope(http.session, http.api_key, provider_url, http.options, gaffa_sem=http.gaffa_sem)
+        prov_env = await browse_capture_envelope(
+            http.session, http.api_key, provider_url, http.options, gaffa_sem=http.gaffa_sem
+        )
         prov_path = write_provider_page_json(page_num, slug, prov_env)
         logger.debug("provider OK page=%s slug=%s path=%s", page_num, slug, prov_path)
     except (OSError, TimeoutError, RuntimeError, aiohttp.ClientError, TypeError, ValueError) as exc:
@@ -188,7 +190,10 @@ async def _gather_ok_index_rows(
     http: GaffaHttp,
     batch: list[tuple[str, str]],
 ) -> list[tuple[str, str, dict, str]]:
-    index_tasks = [fetch_profile_index_html(http.session, http.api_key, page_url, http.options, gaffa_sem=http.gaffa_sem) for _key, page_url in batch]
+    index_tasks = [
+        fetch_profile_index_html(http.session, http.api_key, page_url, http.options, gaffa_sem=http.gaffa_sem)
+        for _key, page_url in batch
+    ]
     index_results = await asyncio.gather(*index_tasks, return_exceptions=True)
     ok_rows: list[tuple[str, str, dict, str]] = []
     for (key, page_url), outcome in zip(batch, index_results):
