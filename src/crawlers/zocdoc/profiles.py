@@ -1,5 +1,6 @@
-"""Scrap Zocdoc via Gaffa browser automation
-python -m src.crawlers.profiles
+"""Scrap Zocdoc profiles via Gaffa browser automation.
+
+python -m src.crawlers.zocdoc.profiles
 """
 
 from __future__ import annotations
@@ -16,20 +17,25 @@ from src.api_requests.client import (
     run_browser_request_to_completion,
 )
 from src.config.base_logger import get_logger
-from src.config.constants import MAX_PROVIDERS_PER_LISTING, TIME_LIMIT_MS, ZOCDOC_ORIGIN
+from src.config.constants import TIME_LIMIT_MS
 from src.config.env import GAFFA_API_KEY, gaffa_concurrency_settings
+from src.crawlers.zocdoc.constants import (
+    MAX_PROVIDERS_PER_LISTING,
+    PROFILES_DATA_DIR,
+    PROFILES_SEED_URL,
+)
+from src.crawlers.zocdoc.parsers import (
+    absolute_zocdoc_urls,
+    profile_index_pagination_hrefs,
+    provider_hrefs_from_html,
+    provider_slug_from_url,
+)
 from src.output.json_out import (
     index_page_number,
     write_index_page_json,
     write_provider_page_json,
 )
 from src.processors.envelope import capture_dom_output_url, gaffa_envelope_json
-from src.processors.provider_links import (
-    absolute_zocdoc_urls,
-    profile_index_pagination_hrefs,
-    provider_hrefs_from_html,
-    provider_slug_from_url,
-)
 
 logger = get_logger()
 
@@ -67,7 +73,7 @@ class IndexRowSchedule:
     hit_cap: bool
 
 
-def browse_request_body(url: str) -> dict:
+def browse_request_body(url: str, *, time_limit_ms: int | None = TIME_LIMIT_MS) -> dict:
     """
     Browser request input (url, proxy_location, async, max_cache_age, settings) per
     POST /v1/browser/requests OpenAPI schema; actions per browser-requests docs.
@@ -78,7 +84,7 @@ def browse_request_body(url: str) -> dict:
         "async": True,
         "max_cache_age": 0,
         "settings": {
-            "time_limit": TIME_LIMIT_MS,
+            "time_limit": time_limit_ms,
             "record_request": True,
             "actions": [
                 {"type": "wait", "time": 8000},
@@ -98,7 +104,7 @@ def browse_request_body(url: str) -> dict:
 
 def canonical_index_url(url: str) -> str:
     """canonicalize index url"""
-    resolved = absolute_zocdoc_urls([url], origin=ZOCDOC_ORIGIN)
+    resolved = absolute_zocdoc_urls([url])
     return resolved[0] if resolved else url
 
 
@@ -145,7 +151,7 @@ async def fetch_profile_index_html(
 def enqueue_pagination_links(queue: deque[str], seen: set[str], html: str) -> None:
     """enqueue pagination links"""
     for ph in profile_index_pagination_hrefs(html):
-        for absolute in absolute_zocdoc_urls([ph], origin=ZOCDOC_ORIGIN):
+        for absolute in absolute_zocdoc_urls([ph]):
             nk = canonical_index_url(absolute)
             if nk not in seen:
                 queue.append(absolute)
@@ -177,10 +183,8 @@ async def _fetch_and_write_provider(
     slug: str,
 ) -> None:
     try:
-        prov_env = await browse_capture_envelope(
-            http.session, http.api_key, provider_url, http.options, gaffa_sem=http.gaffa_sem
-        )
-        prov_path = write_provider_page_json(page_num, slug, prov_env)
+        prov_env = await browse_capture_envelope(http.session, http.api_key, provider_url, http.options, gaffa_sem=http.gaffa_sem)
+        prov_path = write_provider_page_json(PROFILES_DATA_DIR, page_num, slug, prov_env)
         logger.debug("provider OK page=%s slug=%s path=%s", page_num, slug, prov_path)
     except (OSError, TimeoutError, RuntimeError, aiohttp.ClientError, TypeError, ValueError) as exc:
         logger.warning("provider FAIL page=%s slug=%s url=%s: %s", page_num, slug, provider_url, exc)
@@ -190,10 +194,7 @@ async def _gather_ok_index_rows(
     http: GaffaHttp,
     batch: list[tuple[str, str]],
 ) -> list[tuple[str, str, dict, str]]:
-    index_tasks = [
-        fetch_profile_index_html(http.session, http.api_key, page_url, http.options, gaffa_sem=http.gaffa_sem)
-        for _key, page_url in batch
-    ]
+    index_tasks = [fetch_profile_index_html(http.session, http.api_key, page_url, http.options, gaffa_sem=http.gaffa_sem) for _key, page_url in batch]
     index_results = await asyncio.gather(*index_tasks, return_exceptions=True)
     ok_rows: list[tuple[str, str, dict, str]] = []
     for (key, page_url), outcome in zip(batch, index_results):
@@ -213,10 +214,10 @@ def _schedule_providers_for_row(
     cap: int | None,
 ) -> IndexRowSchedule:
     page_num = index_page_number(key)
-    index_path = write_index_page_json(page_num, key, env)
+    index_path = write_index_page_json(PROFILES_DATA_DIR, page_num, key, env)
     logger.info("index JSON page=%s path=%s", page_num, index_path)
 
-    page_urls = absolute_zocdoc_urls(provider_hrefs_from_html(html), origin=ZOCDOC_ORIGIN)
+    page_urls = absolute_zocdoc_urls(provider_hrefs_from_html(html))
     seen_slugs: set[str] = set()
     tasks: list[asyncio.Task[None]] = []
     hit_cap = False
@@ -299,7 +300,7 @@ async def _run_crawl_cycles(
 
 async def crawl_profile_indexes(api_key: str) -> None:
     """Crawl every profile-list URL discovered via pagination until the queue is empty."""
-    target_url = "https://www.zocdoc.com/profiles/new-york"
+    target_url = PROFILES_SEED_URL
     options = GaffaClientOptions(base_url=DEFAULT_API_BASE)
     index_batch, sem_slots = gaffa_concurrency_settings()
     state = CrawlState(deque([target_url]), set())
@@ -324,7 +325,7 @@ async def main() -> None:
     if not api_key:
         logger.error("GAFFA_API_KEY is not set.")
         raise RuntimeError("GAFFA_API_KEY is not set.")
-    logger.info("profiles module starting")
+    logger.info("zocdoc profiles starting")
     await crawl_profile_indexes(api_key)
 
 

@@ -1,4 +1,4 @@
-"""Provider links on Zocdoc index HTML"""
+"""Zocdoc HTML parsing and URL helpers."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from src.config.base_logger import get_logger
+from src.crawlers.zocdoc.constants import ZOCDOC_ORIGIN
 
 logger = get_logger()
 
@@ -52,8 +53,8 @@ def profile_index_pagination_hrefs(html: str) -> list[str]:
     return out
 
 
-def absolute_zocdoc_urls(hrefs: list[str], *, origin: str) -> list[str]:
-    """Resolve hrefs to absolute zocdoc.com URLs and dedupe"""
+def absolute_zocdoc_urls(hrefs: list[str], *, origin: str = ZOCDOC_ORIGIN) -> list[str]:
+    """Resolve hrefs to absolute zocdoc.com URLs and dedupe."""
     urls: list[str] = []
     for href in hrefs:
         href = (href or "").strip()
@@ -80,7 +81,7 @@ def absolute_zocdoc_urls(hrefs: list[str], *, origin: str) -> list[str]:
 
 
 def provider_slug_from_url(url: str) -> str | None:
-    """Folder/file stem from a provider URL or path"""
+    """Folder/file stem from a provider URL or path."""
     href = (url or "").strip()
     if not href:
         return None
@@ -93,3 +94,9 @@ def provider_slug_from_url(url: str) -> str | None:
     if not parts:
         return None
     return parts[-1]
+
+
+def canonical_profile_index_url(url: str) -> str:
+    """Canonicalize a profile index URL."""
+    resolved = absolute_zocdoc_urls([url])
+    return resolved[0] if resolved else url
